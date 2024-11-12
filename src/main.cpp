@@ -4,7 +4,6 @@
 
 #define DAC_SIGNAL_MODE    0
 #define DAC_CHAN_SIZE      I2S_BITS_PER_CHAN_DEFAULT
-#define DAC_SAMPLE_SHIFT   0
 
 #if defined(DAC_16_BITS)
   #define DAC_SAMPLE_SIZE  I2S_BITS_PER_SAMPLE_16BIT
@@ -21,7 +20,8 @@
 #define SAMPLE_RATE        16000
 #define HZ                 400
 #define BUFFER_SIZE        (sizeof(dac_sample_t)*SAMPLE_RATE/HZ)
-#define BUFFER_TIMEOUT_MS  10
+#define BUFFER_TIMEOUT_MS  (3*1000*used_buffer/sizeof(dac_sample_t)/SAMPLE_RATE)
+
 
 #if defined(BOARD_S3C1)
 
@@ -34,6 +34,7 @@
 #define GAIN_6DB   HIGH
 
 #define LED_PIN    48
+#define BTN_PIN     0
 
 #elif defined(BOARD_MINI)
 
@@ -41,7 +42,8 @@
 #define CONFIG_I2S_OUT_LRCK_PIN  16
 #define CONFIG_I2S_OUT_DATA_PIN  17
 
-#define LED_PIN    2
+#define LED_PIN     2
+#define BTN_PIN     0
 
 #endif
 
@@ -52,11 +54,11 @@
 rgb::NeoCircle<0x7f, 0x7f/3, false> circle(LED_PIN);
 
 char buffer[BUFFER_SIZE];
-size_t used_buffer = 0;  // part of buffer used by complete sine wave samples
+size_t used_buffer = 0;  // bytes of buffer used by complete sine wave samples
 
 
 template <typename S>
-void print_sample(const char *fmt, S s) {
+void print_sample( const char *fmt, S s ) {
   Serial.printf(fmt, s);
 }
 
@@ -97,20 +99,20 @@ size_t gen_sine( char *buffer, size_t size, size_t hz, size_t rate ) {
   size_t used_bytes = 0;
   for (size_t w = 0; w < waves; w++) {
     for (size_t s = 0; s < wave_samples; s++) {
-      ((S *)buffer)[w*wave_samples + s] = (S)(sin(2*PI*s/wave_samples)*amplitude/8);
+      ((S *)buffer)[w*wave_samples + s] = (S)(sin(2*PI*s/wave_samples)*amplitude/4);
       used_bytes += sizeof(S);
     }
   }
 
   size_t buffer_time = 1000000*waves/hz;
-  Serial.printf("sine %u hz, %u waves/buffer, %u samples/wave, %u bytes = %u us\n", 
+  Serial.printf("Sine wave %u hz, %u waves/buffer, %u samples/wave, %u bytes = %u us\n", 
     hz, waves, wave_samples, used_bytes, buffer_time);
   
   return used_bytes;
 }
 
 
-void InstallI2SDriver( i2s_port_t port, size_t size ) {
+void InstallI2SDriver( i2s_port_t port, size_t buffer_bytes ) {
   esp_err_t err = ESP_OK;
 
   i2s_config_t i2s_config = {
@@ -118,15 +120,15 @@ void InstallI2SDriver( i2s_port_t port, size_t size ) {
     .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    // .dma_desc_num         = 3,
-    .dma_buf_count        = 3,
+    .dma_desc_num         = 3,
+    // .dma_buf_count        = 3,
   };
 
   i2s_config.mode               = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
   i2s_config.bits_per_sample    = DAC_SAMPLE_SIZE;
   i2s_config.bits_per_chan      = DAC_CHAN_SIZE;
-  // i2s_config.dma_frame_num      = size/sizeof(dac_sample_t);
-  i2s_config.dma_buf_len        = size/sizeof(dac_sample_t);
+  i2s_config.dma_frame_num      = buffer_bytes/sizeof(dac_sample_t);
+  // i2s_config.dma_buf_len        = buffer_bytes/sizeof(dac_sample_t);
   i2s_config.use_apll           = true;
   i2s_config.tx_desc_auto_clear = true;
 
@@ -176,6 +178,8 @@ void stop_dac() {
 
 
 void dacTaskCode( void * parameter ) {
+  Serial.printf("Dac  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+
   size_t bytes_written;
 
   for(;;) {
@@ -213,6 +217,12 @@ void setup() {
 
   used_buffer = gen_sine<dac_sample_t>(buffer, BUFFER_SIZE, HZ, SAMPLE_RATE);
 
+  Serial.printf("Rate %u samples/s, buffer %u bytes, timeout %u ms\n", 
+    SAMPLE_RATE, BUFFER_SIZE, BUFFER_TIMEOUT_MS);
+  Serial.printf("Pins BCK %d, LRCK %d, DATA %d, LED %d, BTN %d\n",
+    CONFIG_I2S_OUT_BCK_PIN, CONFIG_I2S_OUT_LRCK_PIN, 
+    CONFIG_I2S_OUT_DATA_PIN, LED_PIN, BTN_PIN);
+
   start_dac(used_buffer);
   stop_dac();
   start_dac(used_buffer);
@@ -220,6 +230,7 @@ void setup() {
   UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
   BaseType_t core = 1 - xPortGetCoreID();
   xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, NULL, prio, NULL, core);
+  delay(20);
 
   Serial.println("Init done");
 }
@@ -241,8 +252,8 @@ void loop() {
     print_samples<dac_sample_t>("buf", DAC_SAMPLE_FMT, buffer, used_buffer);
   }
 
-  if (!digitalRead(0)) {
-    while(!digitalRead(0)) delay(2);
+  if (!digitalRead(BTN_PIN)) {
+    do { delay(10); } while (!digitalRead(BTN_PIN));
     ESP.restart();
   }
 
