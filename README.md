@@ -1,7 +1,7 @@
-Works on classic ESP32 but not really (yet?) on S3 :(
+Works on classic ESP32 and on S3 :)
 
-Result heavily depends on platform version. 
-Current stable (2.0.17?) produces correct sound + lower amplitude 5xfrequency overlay, sometimes scratchy
+Tried pins 11, 12, 13 or 4, 5, 6. They do not work but produce different mixed sine wave patterns
+Pins 35, 36, 36 seem to work!
+Thanks to a hint from PSchatzmann :)
 
-Result also depends on pins
-B,LR,D = 6,5,4 works much better than 12,11,14
+Success was independent from platform version. 
