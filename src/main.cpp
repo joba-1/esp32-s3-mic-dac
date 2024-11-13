@@ -25,9 +25,20 @@
 
 #if defined(BOARD_S3C1)
 
+// see http://wiki.fluidnc.com/en/hardware/ESP32-S3_Pin_Reference
 #define CONFIG_I2S_OUT_BCK_PIN   37
 #define CONFIG_I2S_OUT_LRCK_PIN  36
 #define CONFIG_I2S_OUT_DATA_PIN  35
+// #define CONFIG_I2S_OUT_BCK_PIN   12
+// #define CONFIG_I2S_OUT_LRCK_PIN  11
+// #define CONFIG_I2S_OUT_DATA_PIN  14
+
+// Solder bridges for my pcm5101a
+// SCK  -> Gnd = internal clock
+// FLT  -> Gnd = normal, fir 0.5ms latency
+// DEMP -> Gnd = deactivate because no one uses this...
+// XSMT -> Vcc = force unmute, deactivate mute via pin,
+// FMT  -> Gnd = I2S as used by the pico
 
 #define CONFIG_I2S_OUT_GAIN_PIN  13
 #define GAIN_12DB  LOW
@@ -99,7 +110,7 @@ size_t gen_sine( char *buffer, size_t size, size_t hz, size_t rate ) {
   size_t used_bytes = 0;
   for (size_t w = 0; w < waves; w++) {
     for (size_t s = 0; s < wave_samples; s++) {
-      ((S *)buffer)[w*wave_samples + s] = (S)(sin(2*PI*s/wave_samples)*amplitude/4);
+      ((S *)buffer)[w*wave_samples + s] = (S)(sin(2*PI*s/wave_samples)*amplitude/8);
       used_bytes += sizeof(S);
     }
   }
@@ -120,15 +131,15 @@ void InstallI2SDriver( i2s_port_t port, size_t buffer_bytes ) {
     .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    .dma_desc_num         = 3,
-    // .dma_buf_count        = 3,
+    // .dma_desc_num         = 3,
+    .dma_buf_count        = 3,
   };
 
   i2s_config.mode               = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
   i2s_config.bits_per_sample    = DAC_SAMPLE_SIZE;
   i2s_config.bits_per_chan      = DAC_CHAN_SIZE;
-  i2s_config.dma_frame_num      = buffer_bytes/sizeof(dac_sample_t);
-  // i2s_config.dma_buf_len        = buffer_bytes/sizeof(dac_sample_t);
+  // i2s_config.dma_frame_num      = buffer_bytes/sizeof(dac_sample_t);
+  i2s_config.dma_buf_len        = buffer_bytes/sizeof(dac_sample_t);
   i2s_config.use_apll           = true;
   i2s_config.tx_desc_auto_clear = true;
 
@@ -208,6 +219,8 @@ void setup() {
   #endif
 
   Serial.begin(115200);
+  while (!Serial);
+  delay(10);
   Serial.printf("Main start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
 
   #ifdef CONFIG_I2S_OUT_GAIN_PIN
@@ -233,6 +246,8 @@ void setup() {
   delay(20);
 
   Serial.println("Init done");
+  Serial.flush();
+  delay(10);
 }
 
 
