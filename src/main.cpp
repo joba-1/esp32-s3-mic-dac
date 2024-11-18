@@ -26,12 +26,26 @@
 #if defined(BOARD_S3C1)
 
 // see http://wiki.fluidnc.com/en/hardware/ESP32-S3_Pin_Reference
-#define CONFIG_I2S_OUT_BCK_PIN   37
-#define CONFIG_I2S_OUT_LRCK_PIN  36
-#define CONFIG_I2S_OUT_DATA_PIN  35
-// #define CONFIG_I2S_OUT_BCK_PIN   12
-// #define CONFIG_I2S_OUT_LRCK_PIN  11
-// #define CONFIG_I2S_OUT_DATA_PIN  14
+// normally (H)SPI2
+#define CONFIG_I2S_OUT_BCK_PIN   12
+#define CONFIG_I2S_OUT_LRCK_PIN  13
+#define CONFIG_I2S_OUT_DATA_PIN  11
+// normally (V)SPI3
+#define CONFIG_I2S_IN_BCK_PIN   36
+#define CONFIG_I2S_IN_LRCK_PIN  37
+#define CONFIG_I2S_IN_DATA_PIN  35
+
+#define RS485_TX  17
+#define RS485_RX  18
+
+// S3 avoid use
+// Flash/PSRAM: 26-32
+// Strapping: 0, 3, 45, 46
+// Debug/USB: 19, 20
+
+// UART0 TX, RX defaults: 43, 44, fixed
+// UART1 TX, RX defaults: 17, 18, any
+// UART2 TX, RX defaults: --, --, any
 
 // Solder bridges for my pcm5101a
 // SCK  -> Gnd = internal clock
@@ -40,7 +54,7 @@
 // XSMT -> Vcc = force unmute, deactivate mute via pin,
 // FMT  -> Gnd = I2S as used by the pico
 
-#define CONFIG_I2S_OUT_GAIN_PIN  13
+#define CONFIG_I2S_OUT_GAIN_PIN  10
 #define GAIN_12DB  LOW
 #define GAIN_6DB   HIGH
 
@@ -62,7 +76,8 @@
 #include <driver/i2s.h>
 
 #include <rgb_circle.hpp>
-rgb::NeoCircle<0x7f, 0x7f/3, false> circle(LED_PIN);
+//rgb::NeoCircle<0x7f, 0x7f/3, false> circle(LED_PIN);
+rgb::NeoCircle<0xff, 0xff, false> circle(LED_PIN);
 
 char buffer[BUFFER_SIZE];
 size_t used_buffer = 0;  // bytes of buffer used by complete sine wave samples
