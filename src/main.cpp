@@ -73,11 +73,9 @@
 #endif
 
 
-#include <driver/i2s.h>
-
 #include <rgb_circle.hpp>
-//rgb::NeoCircle<0x7f, 0x7f/3, false> circle(LED_PIN);
-rgb::NeoCircle<0xff, 0xff, false> circle(LED_PIN);
+rgb::NeoRawCircle<0xff/6> circle(LED_PIN);
+
 
 char buffer[BUFFER_SIZE];
 size_t used_buffer = 0;  // bytes of buffer used by complete sine wave samples
@@ -137,6 +135,8 @@ size_t gen_sine( char *buffer, size_t size, size_t hz, size_t rate ) {
   return used_bytes;
 }
 
+
+#include <driver/i2s.h>
 
 void InstallI2SDriver( i2s_port_t port, size_t buffer_bytes ) {
   esp_err_t err = ESP_OK;
@@ -229,7 +229,7 @@ void setup() {
   
   #if ARDUINO_USB_CDC_ON_BOOT == 1
     if (ESP_RST_POWERON == esp_reset_reason()) {
-      delay(6500);
+      delay(6500);  // let host recognize the new usb device...
     }
   #endif
 

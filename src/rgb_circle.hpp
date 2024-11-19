@@ -6,7 +6,7 @@
 namespace rgb {
 
 template <
-    unsigned IM,  // max intensity <= 0xff
+    unsigned IM,  // max intensity <= 0xff (only used if R == true)
     unsigned IL,  // intensity limit <= im
     bool R >      // reduce lower intensities
 class Circle {
@@ -64,6 +64,13 @@ private:
 
     NeoCircle();
     NeoCircle( NeoCircle & );
+};
+
+
+template <unsigned IL>
+class NeoRawCircle : public NeoCircle<0xff, IL, false> {
+public:
+    NeoRawCircle( int p ) : NeoCircle<0xff, IL, false>(p) {}
 };
 
 }  // namespace rgb
