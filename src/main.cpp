@@ -2,15 +2,12 @@
 
 //#define DAC_16_BITS
 
-#define DAC_SIGNAL_MODE    0
-#define DAC_CHAN_SIZE      I2S_BITS_PER_CHAN_DEFAULT
-
 #if defined(DAC_16_BITS)
-  #define DAC_SAMPLE_SIZE  I2S_BITS_PER_SAMPLE_16BIT
+  #define DAC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_16BIT
   #define DAC_SAMPLE_FMT   "%04hx"
   typedef int16_t          dac_sample_t;
 #else
-  #define DAC_SAMPLE_SIZE  I2S_BITS_PER_SAMPLE_32BIT
+  #define DAC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_32BIT
   #define DAC_SAMPLE_FMT   "%08x"
   typedef int32_t          dac_sample_t;
 #endif
@@ -136,90 +133,87 @@ size_t gen_sine( char *buffer, size_t size, size_t hz, size_t rate ) {
 }
 
 
-#include <driver/i2s.h>
+#include <ESP_I2S.h>
 
-void InstallI2SDriver( i2s_port_t port, size_t buffer_bytes ) {
-  esp_err_t err = ESP_OK;
+// I2SClass I2S_MIC;
+I2SClass I2S_DAC;
 
-  i2s_config_t i2s_config = {
-    .sample_rate          = SAMPLE_RATE,
-    .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    // .dma_desc_num         = 3,
-    .dma_buf_count        = 3,
-  };
 
-  i2s_config.mode               = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-  i2s_config.bits_per_sample    = DAC_SAMPLE_SIZE;
-  i2s_config.bits_per_chan      = DAC_CHAN_SIZE;
-  // i2s_config.dma_frame_num      = buffer_bytes/sizeof(dac_sample_t);
-  i2s_config.dma_buf_len        = buffer_bytes/sizeof(dac_sample_t);
-  i2s_config.use_apll           = true;
-  i2s_config.tx_desc_auto_clear = true;
+// const int buff_size = 128;
+// int available_bytes, read_bytes;
+// uint8_t buffer[buff_size];
+// I2SClass I2S;
 
-  err = i2s_driver_install(port, &i2s_config, 0, NULL);
+// void setup() {
+//   I2S.setPins(5, 25, 26, 35, 0); //SCK, WS, SDOUT, SDIN, MCLK
+//   I2S.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+//   I2S.read();
+//   available_bytes = I2S.available();
+//   if(available_bytes < buff_size) {
+//     read_bytes = I2S.readBytes(buffer, available_bytes);
+//   } else {
+//     read_bytes = I2S.readBytes(buffer, buff_size);
+//   }
+//   I2S.write(buffer, read_bytes);
+//   I2S.end();
+// }
 
-  if (err != ESP_OK) {
-    Serial.printf("Install I2S driver %d failed with rc = %d\n", port, err);
+
+void InstallI2SDriver( i2s_port_t port ) {
+  if (port == DAC_I2S_NUMBER) {
+    if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
+      Serial.println("dac i2s init failed");
+    }
   }
-
-  uint32_t bits = (i2s_config.bits_per_chan << 16) | i2s_config.bits_per_sample;
-  err = i2s_set_clk(port, SAMPLE_RATE, bits, I2S_CHANNEL_MONO);
-  if (err != ESP_OK) {
-    Serial.printf("Set I2S clock %d failed with rc = %d\n", port, err);
+  else {
+    // I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO);
   }
 }
 
 
 void SetI2SPins( i2s_port_t port ) {
-  esp_err_t err = ESP_OK;
-
-  i2s_pin_config_t tx_pin_config;
-
-  tx_pin_config.mck_io_num = I2S_PIN_NO_CHANGE;
-
-  tx_pin_config.bck_io_num   = CONFIG_I2S_OUT_BCK_PIN;
-  tx_pin_config.ws_io_num    = CONFIG_I2S_OUT_LRCK_PIN;
-
-  tx_pin_config.data_out_num = CONFIG_I2S_OUT_DATA_PIN;
-  tx_pin_config.data_in_num  = I2S_PIN_NO_CHANGE;
-
-  err = i2s_set_pin(port, &tx_pin_config);
-  if (err != ESP_OK) {
-    Serial.printf("Set I2S pins %d failed with rc = %d\n", port, err);
+  if (port == DAC_I2S_NUMBER) {
+    I2S_DAC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
+      CONFIG_I2S_OUT_BCK_PIN, 
+      CONFIG_I2S_OUT_LRCK_PIN, 
+      CONFIG_I2S_OUT_DATA_PIN, 
+      NOT_A_PIN, 
+      NOT_A_PIN);
+  }
+  else {
+    // I2S_MIC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
+    //   CONFIG_I2S_IN_BCK_PIN, 
+    //   CONFIG_I2S_IN_LRCK_PIN, 
+    //   NOT_A_PIN, 
+    //   CONFIG_I2S_IN_DATA_PIN, 
+    //   NOT_A_PIN);
   }
 }
 
 
-void start_dac( size_t size ) {
-  InstallI2SDriver(DAC_I2S_NUMBER, size);
+void start_dac() {
+  InstallI2SDriver(DAC_I2S_NUMBER);
   SetI2SPins(DAC_I2S_NUMBER);
 }
 
 
 void stop_dac() {
-  i2s_driver_uninstall(DAC_I2S_NUMBER);
+  I2S_DAC.end();
 }
 
 
 void dacTaskCode( void * parameter ) {
   Serial.printf("Dac  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
 
-  size_t bytes_written;
-
   for(;;) {
-    if (i2s_write(DAC_I2S_NUMBER, buffer, used_buffer,
-      &bytes_written, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS) == ESP_OK) {
-      if (bytes_written != used_buffer) {
-        Serial.println("i2s write cut");
+    size_t bytes_written = 0;
+    do {
+      if (bytes_written != 0) {
+        Serial.println("notice: i2s write cut");  // not an error, but interesting...
       }
-    }
-    else {
-      Serial.println("i2s write failed");
-    }
-
-    delay(1);
+      bytes_written += I2S_DAC.write((uint8_t *)buffer, used_buffer - bytes_written);
+      delay(1);
+    } while (bytes_written != used_buffer);
   }
 }
 
@@ -242,6 +236,7 @@ void setup() {
     pinMode(CONFIG_I2S_OUT_GAIN_PIN, OUTPUT);
     digitalWrite(CONFIG_I2S_OUT_GAIN_PIN, GAIN_12DB);
   #endif
+  pinMode(BTN_PIN, INPUT_PULLUP);  // press to gnd
 
   used_buffer = gen_sine<dac_sample_t>(buffer, BUFFER_SIZE, HZ, SAMPLE_RATE);
 
@@ -251,9 +246,9 @@ void setup() {
     CONFIG_I2S_OUT_BCK_PIN, CONFIG_I2S_OUT_LRCK_PIN, 
     CONFIG_I2S_OUT_DATA_PIN, LED_PIN, BTN_PIN);
 
-  start_dac(used_buffer);
+  start_dac();
   stop_dac();
-  start_dac(used_buffer);
+  start_dac();
 
   UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
   BaseType_t core = 1 - xPortGetCoreID();

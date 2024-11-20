@@ -17,7 +17,7 @@ public:
         _rgb[_c0] = IL - _i; 
         _rgb[_c1] = _i;
 
-        if (R) {
+        if constexpr (R) {
             // for some leds it looks better with reduced lower intensities
             _rgb[_c0] *= _rgb[_c0];  // square...
             _rgb[_c0] /= IM;         // ...and scale
@@ -56,8 +56,7 @@ public:
 
 private:
     void update( unsigned r, unsigned g, unsigned b ) const {
-        // rgbLedWrite(_p, r, g, b);
-        neopixelWrite(_p, r, g, b);
+        rgbLedWrite(_p, r, g, b);
     }
 
     int _p;
