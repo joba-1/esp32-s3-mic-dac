@@ -192,8 +192,8 @@ void SetI2SPins( i2s_port_t port ) {
 
 
 void start_dac() {
-  InstallI2SDriver(DAC_I2S_NUMBER);
   SetI2SPins(DAC_I2S_NUMBER);
+  InstallI2SDriver(DAC_I2S_NUMBER);
 }
 
 
@@ -246,8 +246,6 @@ void setup() {
     CONFIG_I2S_OUT_BCK_PIN, CONFIG_I2S_OUT_LRCK_PIN, 
     CONFIG_I2S_OUT_DATA_PIN, LED_PIN, BTN_PIN);
 
-  start_dac();
-  stop_dac();
   start_dac();
 
   UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
