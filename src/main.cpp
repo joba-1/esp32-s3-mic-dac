@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
-//#define DAC_16_BITS
-//#define MIC_16_BITS
+#define DAC_16_BITS
+#define MIC_16_BITS
 
 #if defined(DAC_16_BITS)
   #define DAC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_16BIT
@@ -38,9 +38,9 @@ typedef union sample {
 
 
 #define SAMPLE_RATE        16000
-#define HZ                 400
-#define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE/HZ)
-#define BUFFER_TIMEOUT_MS  (3*1000*BUFFER_SIZE/sizeof(sample_t)/SAMPLE_RATE)
+#define BUFFER_TIME_MS     2
+#define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
+#define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
 
 
 // see http://wiki.fluidnc.com/en/hardware/ESP32-S3_Pin_Reference
@@ -185,8 +185,8 @@ void micTaskCode( void *parameter ) {
         bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
       } while (bytes_read != buffer->size());
       
-      // 24bit r -> 32bit l/r
-      const size_t scale_bits = 4;
+      // 24bit r -> 32bit l/r (or 12->16)
+      const size_t scale_bits = 3;
       mic_sample_t *samples = (mic_sample_t *)buffer->data();
       size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
       while (num_samples--) {
