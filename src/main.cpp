@@ -185,28 +185,15 @@ void micTaskCode( void *parameter ) {
         bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
       } while (bytes_read != buffer->size());
       
-      // 24bit -> 32bit
+      // 24bit r -> 32bit l/r
+      const size_t scale_bits = 4;
       mic_sample_t *samples = (mic_sample_t *)buffer->data();
-      size_t num_samples = buffer->size() / sizeof(mic_sample_t);
+      size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
       while (num_samples--) {
-        mic_sample_t sample = *samples;
-        if (sample >= 0) {
-          if (sample < (INT32_MAX>>8)) {
-            sample <<= 8;
-          }
-          else {
-            sample = INT32_MAX;
-          }
-        }
-        else {
-          if (sample > (INT32_MIN>>8)) {
-            sample <<= 8;
-          }
-          else {
-            sample = INT32_MIN;
-          }
-        }
-        *(samples++) = sample;
+        mic_sample_t *l_sample = samples++;
+        mic_sample_t *r_sample = samples++;
+        *r_sample <<= scale_bits;
+        *l_sample = *r_sample;
       }
 
       queues[Q_dac].put(buffer);
