@@ -67,12 +67,17 @@ Circle circle(LED_PIN);
 
 #include "queue.hpp"
 #include <array>
+
+enum Q { Q_mic, Q_dac, Q_print, Q_end };
+const char *Q[] = { "Q_mic", "Q_dac", "Q_print" };
+
 using buffer_t = std::array<uint8_t, BUFFER_SIZE>;
 using buffers_t = std::array<buffer_t, 4>;
 using queue_t = Queue<buffer_t *>;
+using queues_t = std::array<queue_t, Q_end>;
 
 buffers_t buffers;
-queue_t q_useable(buffers.size()), q_filled(buffers.size()/2), q_print(1);
+queues_t queues{buffers.size(), buffers.size()/2, 1};
 
 
 #include "lock.hpp"
@@ -128,7 +133,7 @@ void start_mic() {
       CONFIG_I2S_IN_DATA_PIN, 
       NOT_A_PIN);
 
-    if (!I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
+    if (!I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_STEREO)) {
       Serial.println("mic i2s init failed");
     }
 }
@@ -147,7 +152,7 @@ void start_dac() {
       NOT_A_PIN, 
       NOT_A_PIN);
 
-    if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
+    if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_STEREO)) {
       Serial.println("dac i2s init failed");
     }
 }
@@ -167,7 +172,7 @@ void micTaskCode( void *parameter ) {
   lock.unlock();
 
   for(;;) {
-    if (q_useable.get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+    if (queues[Q_mic].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
 
       size_t bytes_read = 0;
       do {
@@ -175,19 +180,19 @@ void micTaskCode( void *parameter ) {
           lock.lock();
           Serial.println("notice: i2s read cut");  // not an error, but interesting...
           lock.unlock();
+          delay(1);
         }
-        bytes_read += I2S_DAC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
-        delay(1);
+        bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
       } while (bytes_read != buffer->size());
       
-      q_filled.put(buffer);
+      queues[Q_dac].put(buffer);
 
       Lock lock(shared->led);
       circle.next(Circle::R);
+
     }
-    else {
-      delay(1);
-    }
+
+    delay(1);
   }
 }
 
@@ -203,33 +208,32 @@ void dacTaskCode( void *parameter ) {
   lock.unlock();
 
   for(;;) {
-    if (q_filled.get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+    if (queues[Q_dac].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
       size_t bytes_written = 0;
       do {
         if (bytes_written != 0) {
           lock.lock();
           Serial.println("notice: i2s write cut");  // not an error, but interesting...
           lock.unlock();
+          delay(1);
         }
         bytes_written += I2S_DAC.write(buffer->data(), buffer->size() - bytes_written);
-        delay(1);
       } while (bytes_written != buffer->size());
 
       uint32_t now = millis();
       if (now - prev_print > elapsed_print) {
         prev_print = now;
-        q_print.put(buffer);
+        queues[Q_print].put(buffer);
       }
       else {
-        q_useable.put(buffer);
+        queues[Q_mic].put(buffer);
       }
 
       Lock lock(shared->led);
       circle.next(Circle::B);
     }
-    else {
-      delay(1);
-    }
+
+    delay(1);
   }
 }
 
@@ -262,15 +266,16 @@ void setup() {
   start_dac();
 
   for (auto &buffer : buffers) {
-    q_useable.put(&buffer);
+    queues[Q_mic].put(&buffer);
   }
 
   circle.set(0, 0, 0);
 
   UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
-  BaseType_t core = 1 - xPortGetCoreID();
-  xTaskCreatePinnedToCore(micTaskCode, "MicTask", 10000, &shared, prio, NULL, core);
-  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, &shared, prio, NULL, core);
+  BaseType_t mic_core = 1 - xPortGetCoreID();
+  BaseType_t dac_core = 1 - mic_core;
+  xTaskCreatePinnedToCore(micTaskCode, "MicTask", 10000, &shared, prio, NULL, mic_core);
+  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, &shared, prio, NULL, dac_core);
 
   Lock lock(shared.serial);
   Serial.println("Init done");
@@ -278,6 +283,7 @@ void setup() {
 
 
 void loop() {
+  // green led breathing
   const uint32_t elapsed_led = 20;
   static uint32_t prev_led = 0;
   uint32_t now = millis();
@@ -287,13 +293,51 @@ void loop() {
     circle.next(Circle::G);
   }
 
+  // print buffer content
+  const char q_fmt[]  = "%5s[%u]: %4u %s, %2d min, %2u avg, %2u max items %s\n";
   buffer_t *buffer;
-  if (q_print.get(buffer)) {
+  if (queues[Q_print].get(buffer)) {
     Lock lock(shared.serial);
     print_samples<sample_t>("buf", SAMPLE_FMT, buffer->data(), buffer->size());
-    q_useable.put(buffer);
+    lock.unlock();
+    queues[Q_mic].put(buffer);
+    delay(1);
   }
 
+  // print queue stats
+  const uint32_t elapsed_stats = 10000;
+  static uint32_t prev_stats = -elapsed_stats;
+  if (now - prev_stats > elapsed_stats) {
+    prev_stats = now;
+    Serial.printf("\nqueue stats @%u\n", now);
+    for (size_t i=0; i<queues.size(); i++) {
+      auto size = queues[i].size();
+      auto &get_stats = queues[i].get_stats();
+      auto &put_stats = queues[i].put_stats();
+
+      auto get_count = get_stats.count();
+      auto get_min = get_stats.min();
+      auto get_avg = get_stats.avg();
+      auto get_max = get_stats.max();
+
+      auto put_count = put_stats.count();
+      auto put_min = put_stats.min();
+      auto put_avg = put_stats.avg();
+      auto put_max = put_stats.max();
+
+      Lock lock(shared.serial);
+      Serial.printf(q_fmt, &Q[i][2], size, get_count, "get", (int)get_min, get_avg, get_max, "used");
+      Serial.printf(q_fmt, &Q[i][2], size, put_count, "put", (int)put_min, put_avg, put_max, "free");
+      lock.unlock();
+
+      get_stats.init();
+      put_stats.init();
+      
+      delay(1);
+    }
+  }
+
+  // reboot key
   if (!digitalRead(BTN_PIN)) {
     do { delay(10); } while (!digitalRead(BTN_PIN));
     ESP.restart();
