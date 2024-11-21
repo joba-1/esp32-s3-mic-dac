@@ -185,11 +185,34 @@ void micTaskCode( void *parameter ) {
         bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
       } while (bytes_read != buffer->size());
       
+      // 24bit -> 32bit
+      mic_sample_t *samples = (mic_sample_t *)buffer->data();
+      size_t num_samples = buffer->size() / sizeof(mic_sample_t);
+      while (num_samples--) {
+        mic_sample_t sample = *samples;
+        if (sample >= 0) {
+          if (sample < (INT32_MAX>>8)) {
+            sample <<= 8;
+          }
+          else {
+            sample = INT32_MAX;
+          }
+        }
+        else {
+          if (sample > (INT32_MIN>>8)) {
+            sample <<= 8;
+          }
+          else {
+            sample = INT32_MIN;
+          }
+        }
+        *(samples++) = sample;
+      }
+
       queues[Q_dac].put(buffer);
 
       Lock lock(shared->led);
       circle.next(Circle::R);
-
     }
 
     delay(1);
