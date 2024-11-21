@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 //#define DAC_16_BITS
+//#define MIC_16_BITS
 
 #if defined(DAC_16_BITS)
   #define DAC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_16BIT
@@ -12,15 +13,35 @@
   typedef int32_t          dac_sample_t;
 #endif
 
-#define DAC_I2S_NUMBER     I2S_NUM_1
+#if defined(MIC_16_BITS)
+  #define MIC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_16BIT
+  #define MIC_SAMPLE_FMT   "%04hx"
+  typedef int16_t          mic_sample_t;
+#else
+  #define MIC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_32BIT
+  #define MIC_SAMPLE_FMT   "%08x"
+  typedef int32_t          mic_sample_t;
+#endif
+
+typedef union sample {
+  mic_sample_t mic;
+  dac_sample_t dac;
+} sample_t;
+
+#if MIC_SAMPLE_SIZE >= DAC_SAMPLE_SIZE
+  #define SAMPLE_SIZE  MIC_SAMPLE_SIZE
+  #define SAMPLE_FMT   MIC_SAMPLE_FMT
+#else
+  #define SAMPLE_SIZE  DAC_SAMPLE_SIZE
+  #define SAMPLE_FMT   DAC_SAMPLE_FMT
+#endif
+
 
 #define SAMPLE_RATE        16000
 #define HZ                 400
-#define BUFFER_SIZE        (sizeof(dac_sample_t)*SAMPLE_RATE/HZ)
-#define BUFFER_TIMEOUT_MS  (3*1000*used_buffer/sizeof(dac_sample_t)/SAMPLE_RATE)
+#define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE/HZ)
+#define BUFFER_TIMEOUT_MS  (3*1000*BUFFER_SIZE/sizeof(sample_t)/SAMPLE_RATE)
 
-
-#if defined(BOARD_S3C1)
 
 // see http://wiki.fluidnc.com/en/hardware/ESP32-S3_Pin_Reference
 // normally (H)SPI2
@@ -35,47 +56,32 @@
 #define RS485_TX  17
 #define RS485_RX  18
 
-// S3 avoid use
-// Flash/PSRAM: 26-32
-// Strapping: 0, 3, 45, 46
-// Debug/USB: 19, 20
-
-// UART0 TX, RX defaults: 43, 44, fixed
-// UART1 TX, RX defaults: 17, 18, any
-// UART2 TX, RX defaults: --, --, any
-
-// Solder bridges for my pcm5101a
-// SCK  -> Gnd = internal clock
-// FLT  -> Gnd = normal, fir 0.5ms latency
-// DEMP -> Gnd = deactivate because no one uses this...
-// XSMT -> Vcc = force unmute, deactivate mute via pin,
-// FMT  -> Gnd = I2S as used by the pico
-
-#define CONFIG_I2S_OUT_GAIN_PIN  10
-#define GAIN_12DB  LOW
-#define GAIN_6DB   HIGH
-
 #define LED_PIN    48
 #define BTN_PIN     0
 
-#elif defined(BOARD_MINI)
-
-#define CONFIG_I2S_OUT_BCK_PIN   21
-#define CONFIG_I2S_OUT_LRCK_PIN  16
-#define CONFIG_I2S_OUT_DATA_PIN  17
-
-#define LED_PIN     2
-#define BTN_PIN     0
-
-#endif
-
 
 #include <rgb_circle.hpp>
-rgb::NeoRawCircle<0xff/6> circle(LED_PIN);
+using Circle = rgb::NeoRawCircle<0xff/6>;
+Circle circle(LED_PIN);
 
 
-char buffer[BUFFER_SIZE];
-size_t used_buffer = 0;  // bytes of buffer used by complete sine wave samples
+#include "queue.hpp"
+#include <array>
+using buffer_t = std::array<uint8_t, BUFFER_SIZE>;
+using buffers_t = std::array<buffer_t, 4>;
+using queue_t = Queue<buffer_t *>;
+
+buffers_t buffers;
+queue_t q_useable(buffers.size()), q_filled(buffers.size()/2), q_print(1);
+
+
+#include "lock.hpp"
+using shared_t = struct shared {
+  Mutex led;
+  Mutex serial;
+};
+
+shared_t shared;
 
 
 template <typename S>
@@ -84,7 +90,7 @@ void print_sample( const char *fmt, S s ) {
 }
 
 template <typename S>
-void print_samples( const char *tag, const char *fmt, const char *buffer, size_t size ) {
+void print_samples( const char *tag, const char *fmt, uint8_t *buffer, size_t size ) {
   const S *sample = (const S *)buffer;
   const S *end = (const S *)(buffer + size);
   size_t count = 0;
@@ -108,92 +114,42 @@ void print_samples( const char *tag, const char *fmt, const char *buffer, size_t
 }
 
 
-template <typename S>
-size_t gen_sine( char *buffer, size_t size, size_t hz, size_t rate ) {
-  size_t buffer_samples = size/sizeof(S);
-  size_t min_hz = rate / buffer_samples;  // at least one sine wave should fit into the buffer
-  if (hz < min_hz) hz = min_hz;
-  size_t waves = hz * buffer_samples / rate;
-  size_t wave_samples = rate / hz;
-  size_t amplitude = (1U << (sizeof(S)*8 - 1)) - 1;  // max amplitude
-
-  size_t used_bytes = 0;
-  for (size_t w = 0; w < waves; w++) {
-    for (size_t s = 0; s < wave_samples; s++) {
-      ((S *)buffer)[w*wave_samples + s] = (S)(sin(2*PI*s/wave_samples)*amplitude/8);
-      used_bytes += sizeof(S);
-    }
-  }
-
-  size_t buffer_time = 1000000*waves/hz;
-  Serial.printf("Sine wave %u hz, %u waves/buffer, %u samples/wave, %u bytes = %u us\n", 
-    hz, waves, wave_samples, used_bytes, buffer_time);
-  
-  return used_bytes;
-}
-
-
 #include <ESP_I2S.h>
 
-// I2SClass I2S_MIC;
+I2SClass I2S_MIC;
 I2SClass I2S_DAC;
 
 
-// const int buff_size = 128;
-// int available_bytes, read_bytes;
-// uint8_t buffer[buff_size];
-// I2SClass I2S;
+void start_mic() {
+    I2S_MIC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
+      CONFIG_I2S_IN_BCK_PIN, 
+      CONFIG_I2S_IN_LRCK_PIN, 
+      NOT_A_PIN, 
+      CONFIG_I2S_IN_DATA_PIN, 
+      NOT_A_PIN);
 
-// void setup() {
-//   I2S.setPins(5, 25, 26, 35, 0); //SCK, WS, SDOUT, SDIN, MCLK
-//   I2S.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-//   I2S.read();
-//   available_bytes = I2S.available();
-//   if(available_bytes < buff_size) {
-//     read_bytes = I2S.readBytes(buffer, available_bytes);
-//   } else {
-//     read_bytes = I2S.readBytes(buffer, buff_size);
-//   }
-//   I2S.write(buffer, read_bytes);
-//   I2S.end();
-// }
-
-
-void InstallI2SDriver( i2s_port_t port ) {
-  if (port == DAC_I2S_NUMBER) {
-    if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
-      Serial.println("dac i2s init failed");
+    if (!I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
+      Serial.println("mic i2s init failed");
     }
-  }
-  else {
-    // I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO);
-  }
 }
 
 
-void SetI2SPins( i2s_port_t port ) {
-  if (port == DAC_I2S_NUMBER) {
-    I2S_DAC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
-      CONFIG_I2S_OUT_BCK_PIN, 
-      CONFIG_I2S_OUT_LRCK_PIN, 
-      CONFIG_I2S_OUT_DATA_PIN, 
-      NOT_A_PIN, 
-      NOT_A_PIN);
-  }
-  else {
-    // I2S_MIC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
-    //   CONFIG_I2S_IN_BCK_PIN, 
-    //   CONFIG_I2S_IN_LRCK_PIN, 
-    //   NOT_A_PIN, 
-    //   CONFIG_I2S_IN_DATA_PIN, 
-    //   NOT_A_PIN);
-  }
+void stop_mic() {
+  I2S_MIC.end();
 }
 
 
 void start_dac() {
-  SetI2SPins(DAC_I2S_NUMBER);
-  InstallI2SDriver(DAC_I2S_NUMBER);
+    I2S_DAC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
+      CONFIG_I2S_OUT_BCK_PIN,  
+      CONFIG_I2S_OUT_LRCK_PIN, 
+      CONFIG_I2S_OUT_DATA_PIN, 
+      NOT_A_PIN, 
+      NOT_A_PIN);
+
+    if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_MONO)) {
+      Serial.println("dac i2s init failed");
+    }
 }
 
 
@@ -202,24 +158,84 @@ void stop_dac() {
 }
 
 
-void dacTaskCode( void * parameter ) {
-  Serial.printf("Dac  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+void micTaskCode( void *parameter ) {
+  shared_t *shared = (shared_t *)parameter;
+  buffer_t *buffer;
+
+  Lock lock(shared->serial);
+  Serial.printf("Mic  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+  lock.unlock();
 
   for(;;) {
-    size_t bytes_written = 0;
-    do {
-      if (bytes_written != 0) {
-        Serial.println("notice: i2s write cut");  // not an error, but interesting...
-      }
-      bytes_written += I2S_DAC.write((uint8_t *)buffer, used_buffer - bytes_written);
+    if (q_useable.get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+
+      size_t bytes_read = 0;
+      do {
+        if (bytes_read != 0) {
+          lock.lock();
+          Serial.println("notice: i2s read cut");  // not an error, but interesting...
+          lock.unlock();
+        }
+        bytes_read += I2S_DAC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
+        delay(1);
+      } while (bytes_read != buffer->size());
+      
+      q_filled.put(buffer);
+
+      Lock lock(shared->led);
+      circle.next(Circle::R);
+    }
+    else {
       delay(1);
-    } while (bytes_written != used_buffer);
+    }
+  }
+}
+
+
+void dacTaskCode( void *parameter ) {
+  shared_t *shared = (shared_t *)parameter;
+  buffer_t *buffer;
+  const uint32_t elapsed_print = 10000;
+  static uint32_t prev_print = -elapsed_print;
+
+  Lock lock(shared->serial);
+  Serial.printf("Dac  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+  lock.unlock();
+
+  for(;;) {
+    if (q_filled.get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+      size_t bytes_written = 0;
+      do {
+        if (bytes_written != 0) {
+          lock.lock();
+          Serial.println("notice: i2s write cut");  // not an error, but interesting...
+          lock.unlock();
+        }
+        bytes_written += I2S_DAC.write(buffer->data(), buffer->size() - bytes_written);
+        delay(1);
+      } while (bytes_written != buffer->size());
+
+      uint32_t now = millis();
+      if (now - prev_print > elapsed_print) {
+        prev_print = now;
+        q_print.put(buffer);
+      }
+      else {
+        q_useable.put(buffer);
+      }
+
+      Lock lock(shared->led);
+      circle.next(Circle::B);
+    }
+    else {
+      delay(1);
+    }
   }
 }
 
 
 void setup() {
-  ++circle;
+  circle.set(0xff, 0xff, 0xff);
   
   #if ARDUINO_USB_CDC_ON_BOOT == 1
     if (ESP_RST_POWERON == esp_reset_reason()) {
@@ -227,35 +243,37 @@ void setup() {
     }
   #endif
 
-  Serial.begin(115200);
+  Serial.begin(BAUD);
   while (!Serial);
   delay(10);
   Serial.printf("Main start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
 
-  #ifdef CONFIG_I2S_OUT_GAIN_PIN
-    pinMode(CONFIG_I2S_OUT_GAIN_PIN, OUTPUT);
-    digitalWrite(CONFIG_I2S_OUT_GAIN_PIN, GAIN_12DB);
-  #endif
   pinMode(BTN_PIN, INPUT_PULLUP);  // press to gnd
-
-  used_buffer = gen_sine<dac_sample_t>(buffer, BUFFER_SIZE, HZ, SAMPLE_RATE);
 
   Serial.printf("Rate %u samples/s, buffer %u bytes, timeout %u ms\n", 
     SAMPLE_RATE, BUFFER_SIZE, BUFFER_TIMEOUT_MS);
-  Serial.printf("Pins BCK %d, LRCK %d, DATA %d, LED %d, BTN %d\n",
-    CONFIG_I2S_OUT_BCK_PIN, CONFIG_I2S_OUT_LRCK_PIN, 
-    CONFIG_I2S_OUT_DATA_PIN, LED_PIN, BTN_PIN);
+  Serial.printf("Mic BCK %d, LRCK %d, DATA %d\n",
+    CONFIG_I2S_IN_BCK_PIN, CONFIG_I2S_IN_LRCK_PIN, CONFIG_I2S_IN_DATA_PIN);
+  Serial.printf("Dac BCK %d, LRCK %d, DATA %d\n",
+    CONFIG_I2S_OUT_BCK_PIN, CONFIG_I2S_OUT_LRCK_PIN, CONFIG_I2S_OUT_DATA_PIN);
+  Serial.printf("Pins LED %d, BTN %d\n", LED_PIN, BTN_PIN);
 
+  start_mic();
   start_dac();
+
+  for (auto &buffer : buffers) {
+    q_useable.put(&buffer);
+  }
+
+  circle.set(0, 0, 0);
 
   UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
   BaseType_t core = 1 - xPortGetCoreID();
-  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, NULL, prio, NULL, core);
-  delay(20);
+  xTaskCreatePinnedToCore(micTaskCode, "MicTask", 10000, &shared, prio, NULL, core);
+  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, &shared, prio, NULL, core);
 
+  Lock lock(shared.serial);
   Serial.println("Init done");
-  Serial.flush();
-  delay(10);
 }
 
 
@@ -265,14 +283,15 @@ void loop() {
   uint32_t now = millis();
   if (now - prev_led > elapsed_led) {
     prev_led = now;
-    ++circle;
+    Lock lock(shared.led);
+    circle.next(Circle::G);
   }
 
-  const uint32_t elapsed_print = 10000;
-  static uint32_t prev_print = -elapsed_print;
-  if (now - prev_print > elapsed_print) {
-    prev_print = now;
-    print_samples<dac_sample_t>("buf", DAC_SAMPLE_FMT, buffer, used_buffer);
+  buffer_t *buffer;
+  if (q_print.get(buffer)) {
+    Lock lock(shared.serial);
+    print_samples<sample_t>("buf", SAMPLE_FMT, buffer->data(), buffer->size());
+    q_useable.put(buffer);
   }
 
   if (!digitalRead(BTN_PIN)) {
