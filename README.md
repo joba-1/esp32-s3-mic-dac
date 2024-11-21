@@ -4,6 +4,7 @@ WIP, used to test new Arduino 3.x I2S API on my ESP32 S3s
 
 These two combinations should work well:
 
+```
 // normally (H)SPI2
 #define CONFIG_I2S_OUT_BCK_PIN   12
 #define CONFIG_I2S_OUT_LRCK_PIN  13
@@ -15,3 +16,4 @@ These two combinations should work well:
 
 #define RS485_TX  17
 #define RS485_RX  18 
+```
