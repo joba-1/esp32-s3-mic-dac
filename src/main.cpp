@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
 #define SAMPLE_RATE        16000
-#define BUFFER_TIME_MS     4
+#define BUFFER_TIME_MS     2
 #define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
 #define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
 
@@ -62,6 +62,9 @@ typedef union sample {
 #define BTN_PIN     0
 
 
+const char magic[] = {0xa5, 0x5a, 0x55, 0xaa};
+
+
 #include <rgb_circle.hpp>
 using Circle = rgb::NeoRawCircle<0xff/6>;
 Circle circle(LED_PIN);
@@ -102,7 +105,7 @@ void print_samples( const char *tag, const char *fmt, uint8_t *buffer, size_t si
   const S *end = (const S *)(buffer + size);
   size_t count = 0;
 
-  Serial.printf("\n%s[%u] @ %p:\n", tag, size, buffer);
+  Serial.printf("\n%s[%u] at %p:\n", tag, size, buffer);
   while (sample < end) {
     print_sample<S>(fmt, *sample);
     count++;
@@ -225,6 +228,9 @@ void txTaskCode( void *parameter ) {
 
   for(;;) {
     if (queues[Q_tx].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+
+      Serial1.write(magic, sizeof(magic));
+
       size_t bytes_written = 0;
       size_t bytes_to_write = buffer->size()/2;
 
@@ -246,6 +252,26 @@ void txTaskCode( void *parameter ) {
 }
 
 
+void find_magic( Lock &lock ) {
+  int ch;
+  size_t len;
+  bool sync = true;
+  do {
+    for (len=0; len<sizeof(magic); len++) {
+      if ((ch = Serial1.read()) != magic[len]) {
+        if (sync) {
+          sync = false;
+          lock.lock();
+          Serial.println("Out of sync");
+          lock.unlock();
+        }
+        break;
+      } 
+    }
+  } while (len != sizeof(magic));
+}
+
+
 void rxTaskCode( void *parameter ) {
   shared_t *shared = (shared_t *)parameter;
   buffer_t *buffer;
@@ -256,6 +282,9 @@ void rxTaskCode( void *parameter ) {
 
   for(;;) {
     if (queues[Q_rx].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+
+      find_magic(lock);
+
       size_t bytes_read = 0;
       size_t bytes_to_read = buffer->size()/2;
 
@@ -403,7 +432,7 @@ void loop() {
   buffer_t *buffer;
   if (queues[Q_print].get(buffer)) {
     Lock lock(shared.serial);
-    print_samples<sample_t>("buf", SAMPLE_FMT, buffer->data(), buffer->size());
+    print_samples<sample_t>("Buffer", SAMPLE_FMT, buffer->data(), buffer->size());
     lock.unlock();
     queues[Q_rx].put(buffer);
     delay(1);
@@ -414,7 +443,7 @@ void loop() {
   static uint32_t prev_stats = -elapsed_stats;
   if (now - prev_stats > elapsed_stats) {
     prev_stats = now;
-    Serial.printf("\nqueue stats @%u\n", now);
+    Serial.printf("\nQueue stats @%u\n", now);
     for (size_t i=0; i<queues.size(); i++) {
       auto size = queues[i].size();
       auto &get_stats = queues[i].get_stats();
