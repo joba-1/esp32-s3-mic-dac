@@ -1,5 +1,13 @@
 #include <Arduino.h>
 
+#define SAMPLE_RATE        16000
+#define BUFFER_TIME_MS     2
+#define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
+#define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
+
+// Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
+#define RS485_BAUD  (460800*2)
+
 #define DAC_16_BITS
 #define MIC_16_BITS
 
@@ -37,12 +45,6 @@ typedef union sample {
 #endif
 
 
-#define SAMPLE_RATE        16000
-#define BUFFER_TIME_MS     8
-#define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
-#define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
-
-
 // see http://wiki.fluidnc.com/en/hardware/ESP32-S3_Pin_Reference
 // normally (H)SPI2
 #define CONFIG_I2S_OUT_BCK_PIN   12
@@ -53,8 +55,6 @@ typedef union sample {
 #define CONFIG_I2S_IN_LRCK_PIN  37
 #define CONFIG_I2S_IN_DATA_PIN  35
 
-// Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
-#define RS485_BAUD  (460800*2)
 #define RS485_TX    17
 #define RS485_RX    18
 
@@ -175,8 +175,10 @@ void micTaskCode( void *parameter ) {
 
   for(;;) {
     if (queues[Q_mic].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
-
       size_t bytes_read = 0;
+      size_t bytes_to_read = buffer->size();
+
+      uint32_t start = millis();
       do {
         if (bytes_read != 0) {
           lock.lock();
@@ -184,9 +186,13 @@ void micTaskCode( void *parameter ) {
           lock.unlock();
           delay(1);
         }
-        bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
-      } while (bytes_read != buffer->size());
+        bytes_read += I2S_MIC.readBytes((char *)&buffer[bytes_read], bytes_to_read - bytes_read);
+      } while ((bytes_read != bytes_to_read) && ((millis() - start) < BUFFER_TIMEOUT_MS));
       
+      if (bytes_read != bytes_to_read) {
+        memset(&buffer[bytes_read], 0, bytes_to_read - bytes_read);
+      }
+
       // 24bit r -> 32bit mono (or 12->16) for transport
       const size_t scale_bits = 3;  // good for inmp441 
       size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
@@ -230,7 +236,7 @@ void txTaskCode( void *parameter ) {
           lock.unlock();
           delay(1);
         }
-        bytes_written += Serial1.write(buffer->data(), bytes_to_write - bytes_written);
+        bytes_written += Serial1.write((uint8_t *)&buffer[bytes_written], bytes_to_write - bytes_written);
       } while ((bytes_written != bytes_to_write) && ((millis() - start) < BUFFER_TIMEOUT_MS));
 
       queues[Q_mic].put(buffer);
@@ -261,7 +267,7 @@ void rxTaskCode( void *parameter ) {
           lock.unlock();
           delay(1);
         }
-        bytes_read += Serial1.read(buffer->data(), bytes_to_read - bytes_read);
+        bytes_read += Serial1.read((uint8_t *)&buffer[bytes_read], bytes_to_read - bytes_read);
       } while ((bytes_read != bytes_to_read) && ((millis() - start) < BUFFER_TIMEOUT_MS));
 
       if (bytes_read != bytes_to_read) {
@@ -297,6 +303,9 @@ void dacTaskCode( void *parameter ) {
       }
 
       size_t bytes_written = 0;
+      size_t bytes_to_write = buffer->size();
+
+      uint32_t start = millis();
       do {
         if (bytes_written != 0) {
           lock.lock();
@@ -304,8 +313,8 @@ void dacTaskCode( void *parameter ) {
           lock.unlock();
           delay(1);
         }
-        bytes_written += I2S_DAC.write(buffer->data(), buffer->size() - bytes_written);
-      } while (bytes_written != buffer->size());
+        bytes_written += I2S_DAC.write((uint8_t *)&buffer[bytes_written], bytes_to_write - bytes_written);
+      } while ((bytes_written != bytes_to_write) && ((millis() - start) < BUFFER_TIMEOUT_MS));
 
       uint32_t now = millis();
       if (now - prev_print > elapsed_print) {
