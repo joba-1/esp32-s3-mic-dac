@@ -38,7 +38,7 @@ typedef union sample {
 
 
 #define SAMPLE_RATE        16000
-#define BUFFER_TIME_MS     2
+#define BUFFER_TIME_MS     8
 #define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
 #define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
 
@@ -54,7 +54,7 @@ typedef union sample {
 #define CONFIG_I2S_IN_DATA_PIN  35
 
 // Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
-#define RS485_BAUD  921600
+#define RS485_BAUD  (460800*2)
 #define RS485_TX    17
 #define RS485_RX    18
 
@@ -70,7 +70,7 @@ Circle circle(LED_PIN);
 #include "queue.hpp"
 #include <array>
 
-enum Q { Q_mic, Q_rx, Q_tx, Q_dac, Q_print, Q_end };
+enum Q { Q_mic, Q_tx, Q_rx, Q_dac, Q_print, Q_end };
 const char *Q[] = { "Q_mic", "Q_tx", "Q_rx", "Q_dac", "Q_print" };
 
 using buffer_t = std::array<uint8_t, BUFFER_SIZE>;
@@ -204,7 +204,7 @@ void micTaskCode( void *parameter ) {
       circle.next(Circle::R);
     }
 
-    delay(1);
+    delay(BUFFER_TIME_MS/2);
   }
 }
 
@@ -222,6 +222,7 @@ void txTaskCode( void *parameter ) {
       size_t bytes_written = 0;
       size_t bytes_to_write = buffer->size()/2;
 
+      uint32_t start = millis();
       do {
         if (bytes_written != 0) {
           lock.lock();
@@ -230,11 +231,11 @@ void txTaskCode( void *parameter ) {
           delay(1);
         }
         bytes_written += Serial1.write(buffer->data(), bytes_to_write - bytes_written);
-      } while (bytes_written != bytes_to_write);
+      } while ((bytes_written != bytes_to_write) && ((millis() - start) < BUFFER_TIMEOUT_MS));
 
       queues[Q_mic].put(buffer);
     }
-    delay(1);
+    delay(BUFFER_TIME_MS/2);
   }
 }
 
@@ -252,6 +253,7 @@ void rxTaskCode( void *parameter ) {
       size_t bytes_read = 0;
       size_t bytes_to_read = buffer->size()/2;
 
+      uint32_t start = millis();
       do {
         if (bytes_read != 0) {
           lock.lock();
@@ -260,11 +262,15 @@ void rxTaskCode( void *parameter ) {
           delay(1);
         }
         bytes_read += Serial1.read(buffer->data(), bytes_to_read - bytes_read);
-      } while (bytes_read != bytes_to_read);
+      } while ((bytes_read != bytes_to_read) && ((millis() - start) < BUFFER_TIMEOUT_MS));
+
+      if (bytes_read != bytes_to_read) {
+        memset(&buffer[bytes_read], 0, bytes_to_read - bytes_read);
+      }
 
       queues[Q_dac].put(buffer);
     }
-    delay(1);
+    delay(BUFFER_TIME_MS/2);
   }
 }
 
@@ -314,7 +320,7 @@ void dacTaskCode( void *parameter ) {
       circle.next(Circle::B);
     }
 
-    delay(1);
+    delay(BUFFER_TIME_MS/2);
   }
 }
 
@@ -357,7 +363,7 @@ void setup() {
   }
 
   circle.set(0, 0, 0);
-
+  
   UBaseType_t i2s_prio = uxTaskPriorityGet(NULL) + 2;
   UBaseType_t rxtx_prio = uxTaskPriorityGet(NULL) + 1;
   BaseType_t mic_core = 1 - xPortGetCoreID();
@@ -433,5 +439,5 @@ void loop() {
     ESP.restart();
   }
 
-  delay(2);
+  delay(BUFFER_TIME_MS/2);
 }
