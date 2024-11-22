@@ -1,15 +1,15 @@
 #include <Arduino.h>
 
 #define SAMPLE_RATE        16000
-#define BUFFER_TIME_MS     2
+#define BUFFER_TIME_MS     4
 #define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
 #define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
 
 // Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
 #define RS485_BAUD  (460800*2)
 
-#define DAC_16_BITS
-#define MIC_16_BITS
+// #define DAC_16_BITS
+// #define MIC_16_BITS
 
 #if defined(DAC_16_BITS)
   #define DAC_SAMPLE_SIZE  I2S_DATA_BIT_WIDTH_16BIT
@@ -194,7 +194,7 @@ void micTaskCode( void *parameter ) {
       }
 
       // 24bit r -> 32bit mono (or 12->16) for transport
-      const size_t scale_bits = 3;  // good for inmp441 
+      const size_t scale_bits = 4 * sizeof(mic_sample_t)/sizeof(int32_t);  // good for inmp441 
       size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
       mic_sample_t *src = (mic_sample_t *)buffer->data();
       mic_sample_t *dst = src;
