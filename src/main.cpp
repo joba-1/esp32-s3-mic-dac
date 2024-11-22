@@ -53,10 +53,12 @@ typedef union sample {
 #define CONFIG_I2S_IN_LRCK_PIN  37
 #define CONFIG_I2S_IN_DATA_PIN  35
 
-#define RS485_TX  17
-#define RS485_RX  18
+// Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
+#define RS485_BAUD  921600
+#define RS485_TX    17
+#define RS485_RX    18
 
-#define LED_PIN    48
+#define LED_PIN     48
 #define BTN_PIN     0
 
 
@@ -68,16 +70,16 @@ Circle circle(LED_PIN);
 #include "queue.hpp"
 #include <array>
 
-enum Q { Q_mic, Q_dac, Q_print, Q_end };
-const char *Q[] = { "Q_mic", "Q_dac", "Q_print" };
+enum Q { Q_mic, Q_rx, Q_tx, Q_dac, Q_print, Q_end };
+const char *Q[] = { "Q_mic", "Q_tx", "Q_rx", "Q_dac", "Q_print" };
 
 using buffer_t = std::array<uint8_t, BUFFER_SIZE>;
-using buffers_t = std::array<buffer_t, 4>;
+using buffers_t = std::array<buffer_t, 4>;  // 2 per queue
 using queue_t = Queue<buffer_t *>;
 using queues_t = std::array<queue_t, Q_end>;
 
-buffers_t buffers;
-queues_t queues{buffers.size(), buffers.size()/2, 1};
+buffers_t mic_buffers, dac_buffers;
+queues_t queues{mic_buffers.size(), mic_buffers.size()/2, dac_buffers.size(), dac_buffers.size()/2, 1};
 
 
 #include "lock.hpp"
@@ -185,23 +187,83 @@ void micTaskCode( void *parameter ) {
         bytes_read += I2S_MIC.readBytes((char *)buffer->data(), buffer->size() - bytes_read);
       } while (bytes_read != buffer->size());
       
-      // 24bit r -> 32bit l/r (or 12->16)
-      const size_t scale_bits = 3;
-      mic_sample_t *samples = (mic_sample_t *)buffer->data();
+      // 24bit r -> 32bit mono (or 12->16) for transport
+      const size_t scale_bits = 3;  // good for inmp441 
       size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
+      mic_sample_t *src = (mic_sample_t *)buffer->data();
+      mic_sample_t *dst = src;
       while (num_samples--) {
-        mic_sample_t *l_sample = samples++;
-        mic_sample_t *r_sample = samples++;
-        *r_sample <<= scale_bits;
-        *l_sample = *r_sample;
+        src++;                    // skip empty channel
+        *dst = *(src++);          // copy other channel
+        *(dst++) <<= scale_bits;  // and scale it
       }
 
-      queues[Q_dac].put(buffer);
+      queues[Q_tx].put(buffer);
 
       Lock lock(shared->led);
       circle.next(Circle::R);
     }
 
+    delay(1);
+  }
+}
+
+
+void txTaskCode( void *parameter ) {
+  shared_t *shared = (shared_t *)parameter;
+  buffer_t *buffer;
+
+  Lock lock(shared->serial);
+  Serial.printf("Tx   start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+  lock.unlock();
+
+  for(;;) {
+    if (queues[Q_tx].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+      size_t bytes_written = 0;
+      size_t bytes_to_write = buffer->size()/2;
+
+      do {
+        if (bytes_written != 0) {
+          lock.lock();
+          Serial.println("notice: tx write cut");  // not an error, but interesting...
+          lock.unlock();
+          delay(1);
+        }
+        bytes_written += Serial1.write(buffer->data(), bytes_to_write - bytes_written);
+      } while (bytes_written != bytes_to_write);
+
+      queues[Q_mic].put(buffer);
+    }
+    delay(1);
+  }
+}
+
+
+void rxTaskCode( void *parameter ) {
+  shared_t *shared = (shared_t *)parameter;
+  buffer_t *buffer;
+
+  Lock lock(shared->serial);
+  Serial.printf("Rx   start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
+  lock.unlock();
+
+  for(;;) {
+    if (queues[Q_rx].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+      size_t bytes_read = 0;
+      size_t bytes_to_read = buffer->size()/2;
+
+      do {
+        if (bytes_read != 0) {
+          lock.lock();
+          Serial.println("notice: rx read cut");  // not an error, but interesting...
+          lock.unlock();
+          delay(1);
+        }
+        bytes_read += Serial1.read(buffer->data(), bytes_to_read - bytes_read);
+      } while (bytes_read != bytes_to_read);
+
+      queues[Q_dac].put(buffer);
+    }
     delay(1);
   }
 }
@@ -219,6 +281,15 @@ void dacTaskCode( void *parameter ) {
 
   for(;;) {
     if (queues[Q_dac].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+      // convert mono to stereo for pcm5101a
+      size_t num_samples = buffer->size() / sizeof(dac_sample_t) / 2;
+      dac_sample_t *src = ((dac_sample_t *)buffer->data()) + num_samples;  // end of valid mono samples
+      dac_sample_t *dst = src + num_samples;                               // end of all samples
+      while (num_samples--) {
+        *(--dst) = *(--src);
+        *(--dst) = *src; 
+      }
+
       size_t bytes_written = 0;
       do {
         if (bytes_written != 0) {
@@ -236,7 +307,7 @@ void dacTaskCode( void *parameter ) {
         queues[Q_print].put(buffer);
       }
       else {
-        queues[Q_mic].put(buffer);
+        queues[Q_rx].put(buffer);
       }
 
       Lock lock(shared->led);
@@ -262,6 +333,8 @@ void setup() {
   delay(10);
   Serial.printf("Main start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
 
+  Serial1.begin(RS485_BAUD, SERIAL_8N1, RS485_RX, RS485_TX, false, BUFFER_TIMEOUT_MS);
+
   pinMode(BTN_PIN, INPUT_PULLUP);  // press to gnd
 
   Serial.printf("Rate %u samples/s, buffer %u bytes, timeout %u ms\n", 
@@ -275,17 +348,24 @@ void setup() {
   start_mic();
   start_dac();
 
-  for (auto &buffer : buffers) {
+  for (auto &buffer : mic_buffers) {
     queues[Q_mic].put(&buffer);
+  }
+
+  for (auto &buffer : dac_buffers) {
+    queues[Q_rx].put(&buffer);
   }
 
   circle.set(0, 0, 0);
 
-  UBaseType_t prio = uxTaskPriorityGet(NULL) + 1;
+  UBaseType_t i2s_prio = uxTaskPriorityGet(NULL) + 2;
+  UBaseType_t rxtx_prio = uxTaskPriorityGet(NULL) + 1;
   BaseType_t mic_core = 1 - xPortGetCoreID();
   BaseType_t dac_core = 1 - mic_core;
-  xTaskCreatePinnedToCore(micTaskCode, "MicTask", 10000, &shared, prio, NULL, mic_core);
-  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, &shared, prio, NULL, dac_core);
+  xTaskCreatePinnedToCore(micTaskCode, "MicTask", 10000, &shared, i2s_prio,  NULL, mic_core);
+  xTaskCreatePinnedToCore(txTaskCode,  "TxTask",  10000, &shared, rxtx_prio, NULL, mic_core);
+  xTaskCreatePinnedToCore(dacTaskCode, "DacTask", 10000, &shared, i2s_prio,  NULL, dac_core);
+  xTaskCreatePinnedToCore(rxTaskCode,  "RxTask",  10000, &shared, rxtx_prio, NULL, dac_core);
 
   Lock lock(shared.serial);
   Serial.println("Init done");
@@ -310,7 +390,7 @@ void loop() {
     Lock lock(shared.serial);
     print_samples<sample_t>("buf", SAMPLE_FMT, buffer->data(), buffer->size());
     lock.unlock();
-    queues[Q_mic].put(buffer);
+    queues[Q_rx].put(buffer);
     delay(1);
   }
 
