@@ -3,7 +3,7 @@
 #define SAMPLE_RATE        16000
 #define BUFFER_TIME_MS     2
 #define BUFFER_SIZE        (sizeof(sample_t)*SAMPLE_RATE*BUFFER_TIME_MS/1000)
-#define BUFFER_TIMEOUT_MS  (3*BUFFER_TIME_MS)
+#define BUFFER_TIMEOUT_MS  (2*BUFFER_TIME_MS)
 
 // Baud for RS485 r/w at least SAMPLE_RATE * SAMPLE_SIZE * 2 + some headroom...
 #define RS485_BAUD  (460800*2)
@@ -315,6 +315,7 @@ void dacTaskCode( void *parameter ) {
   buffer_t *buffer;
   const uint32_t elapsed_print = 10000;
   static uint32_t prev_print = -elapsed_print;
+  buffer_t silence = {0};
 
   Lock lock(shared->serial);
   Serial.printf("Dac  start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
@@ -356,6 +357,9 @@ void dacTaskCode( void *parameter ) {
 
       Lock lock(shared->led);
       circle.next(Circle::B);
+    }
+    else {
+      I2S_DAC.write((uint8_t *)silence.data(), silence.size());
     }
 
     delay(BUFFER_TIME_MS/2);
