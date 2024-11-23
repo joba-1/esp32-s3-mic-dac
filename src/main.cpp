@@ -130,6 +130,12 @@ I2SClass I2S_MIC;
 I2SClass I2S_DAC;
 
 
+// first 100 ms mic might generate noise
+bool mic_mute = true;
+const uint32_t mic_mute_duration = 400;
+uint32_t mic_mute_start = 0;
+
+
 void start_mic() {
     I2S_MIC.setPins(  //SCK, WS, SDOUT, SDIN, MCLK
       CONFIG_I2S_IN_BCK_PIN, 
@@ -141,12 +147,21 @@ void start_mic() {
     if (!I2S_MIC.begin(I2S_MODE_STD, SAMPLE_RATE, MIC_SAMPLE_SIZE, I2S_SLOT_MODE_STEREO)) {
       Serial.println("mic i2s init failed");
     }
+
+    mic_mute = true;
+    mic_mute_start = millis();
 }
 
 
 void stop_mic() {
   I2S_MIC.end();
 }
+
+
+// first 100 ms dac might generate noise
+bool dac_mute = true;
+const uint32_t dac_mute_duration = 400;
+uint32_t dac_mute_start = 0;
 
 
 void start_dac() {
@@ -160,6 +175,9 @@ void start_dac() {
     if (!I2S_DAC.begin(I2S_MODE_STD, SAMPLE_RATE, DAC_SAMPLE_SIZE, I2S_SLOT_MODE_STEREO)) {
       Serial.println("dac i2s init failed");
     }
+
+    dac_mute = true;
+    dac_mute_start = millis();
 }
 
 
@@ -182,29 +200,36 @@ void micTaskCode( void *parameter ) {
       size_t bytes_to_read = buffer->size();
 
       uint32_t start = millis();
-      do {
-        if (bytes_read != 0) {
-          lock.lock();
-          Serial.println("notice: i2s read cut");  // not an error, but interesting...
-          lock.unlock();
-          delay(1);
+      if (mic_mute) {
+        if (start - mic_mute_start > mic_mute_duration) {
+          mic_mute = false;
         }
-        bytes_read += I2S_MIC.readBytes((char *)&buffer[bytes_read], bytes_to_read - bytes_read);
-      } while ((bytes_read != bytes_to_read) && ((millis() - start) < BUFFER_TIMEOUT_MS));
-      
-      if (bytes_read != bytes_to_read) {
-        memset(&buffer[bytes_read], 0, bytes_to_read - bytes_read);
+      }
+      else {
+        do {
+          if (bytes_read != 0) {
+            lock.lock();
+            Serial.println("notice: i2s read cut");  // not an error, but interesting...
+            lock.unlock();
+            delay(1);
+          }
+          bytes_read += I2S_MIC.readBytes((char *)&buffer[bytes_read], bytes_to_read - bytes_read);
+        } while ((bytes_read != bytes_to_read) && ((millis() - start) < BUFFER_TIMEOUT_MS));
+
+        // 24bit r -> 32bit mono (or 12->16) for transport
+        const size_t scale_bits = 4 * sizeof(mic_sample_t)/sizeof(int32_t);  // good for inmp441 
+        size_t num_samples = bytes_read / sizeof(mic_sample_t) / 2;
+        mic_sample_t *src = (mic_sample_t *)buffer->data();
+        mic_sample_t *dst = src;
+        while (num_samples--) {
+          src++;                    // skip empty channel
+          *dst = *(src++);          // copy other channel
+          *(dst++) <<= scale_bits;  // and scale it
+        }
       }
 
-      // 24bit r -> 32bit mono (or 12->16) for transport
-      const size_t scale_bits = 4 * sizeof(mic_sample_t)/sizeof(int32_t);  // good for inmp441 
-      size_t num_samples = buffer->size() / sizeof(mic_sample_t) / 2;
-      mic_sample_t *src = (mic_sample_t *)buffer->data();
-      mic_sample_t *dst = src;
-      while (num_samples--) {
-        src++;                    // skip empty channel
-        *dst = *(src++);          // copy other channel
-        *(dst++) <<= scale_bits;  // and scale it
+      if (bytes_read != bytes_to_read) {
+        memset(&buffer[bytes_read], 0, bytes_to_read - bytes_read);
       }
 
       queues[Q_tx].put(buffer);
@@ -323,6 +348,7 @@ void dacTaskCode( void *parameter ) {
 
   for(;;) {
     if (queues[Q_dac].get(buffer, BUFFER_TIMEOUT_MS/portTICK_PERIOD_MS)) {
+
       // convert mono to stereo for pcm5101a
       size_t num_samples = buffer->size() / sizeof(dac_sample_t) / 2;
       dac_sample_t *src = ((dac_sample_t *)buffer->data()) + num_samples;  // end of valid mono samples
@@ -336,15 +362,22 @@ void dacTaskCode( void *parameter ) {
       size_t bytes_to_write = buffer->size();
 
       uint32_t start = millis();
-      do {
-        if (bytes_written != 0) {
-          lock.lock();
-          Serial.println("notice: i2s write cut");  // not an error, but interesting...
-          lock.unlock();
-          delay(1);
+      if (dac_mute) {
+        if (start - dac_mute_start > dac_mute_duration) {
+          dac_mute = false;
         }
-        bytes_written += I2S_DAC.write((uint8_t *)&buffer[bytes_written], bytes_to_write - bytes_written);
-      } while ((bytes_written != bytes_to_write) && ((millis() - start) < BUFFER_TIMEOUT_MS));
+      }
+      else {
+        do {
+          if (bytes_written != 0) {
+            lock.lock();
+            Serial.println("notice: i2s write cut");  // not an error, but interesting...
+            lock.unlock();
+            delay(1);
+          }
+          bytes_written += I2S_DAC.write((uint8_t *)&buffer[bytes_written], bytes_to_write - bytes_written);
+        } while ((bytes_written != bytes_to_write) && ((millis() - start) < BUFFER_TIMEOUT_MS));
+      }
 
       uint32_t now = millis();
       if (now - prev_print > elapsed_print) {
@@ -359,6 +392,8 @@ void dacTaskCode( void *parameter ) {
       circle.next(Circle::B);
     }
     else {
+      I2S_DAC.write((uint8_t *)silence.data(), silence.size());
+      delay(BUFFER_TIME_MS/2);
       I2S_DAC.write((uint8_t *)silence.data(), silence.size());
     }
 
@@ -377,8 +412,8 @@ void setup() {
   #endif
 
   Serial.begin(BAUD);
-  while (!Serial);
-  delay(10);
+  uint32_t start = millis();
+  while (!Serial && millis() - start < 1000);
   Serial.printf("Main start at %u with prio %u on core %d\n", millis(), uxTaskPriorityGet(NULL), xPortGetCoreID());
 
   Serial1.begin(RS485_BAUD, SERIAL_8N1, RS485_RX, RS485_TX, false, BUFFER_TIMEOUT_MS);
@@ -394,6 +429,8 @@ void setup() {
   Serial.printf("Pins LED %d, BTN %d\n", LED_PIN, BTN_PIN);
 
   start_mic();
+  mic_mute = true;
+  mic_mute_start = millis();
   start_dac();
 
   for (auto &buffer : mic_buffers) {
@@ -478,6 +515,13 @@ void loop() {
   // reboot key
   if (!digitalRead(BTN_PIN)) {
     do { delay(10); } while (!digitalRead(BTN_PIN));
+    Lock lock(shared.serial);
+    Serial.println("Initiate restart");
+    Serial.flush();
+    lock.unlock();
+    stop_mic();
+    stop_dac();
+    circle.set(0, 0, 0);
     ESP.restart();
   }
 
