@@ -1,8 +1,22 @@
 # Simple I2S MIC to DAC Player
 
+2 way mic/dac intercom over serial line 
 WIP, used to test new Arduino 3.x I2S API on my ESP32 S3s
 
-These two combinations should work well:
+## Done
+* send mic over serial (1 channel stereo mic frames reduced to mono)
+* receive dac over serial (mono duplicated to both dac channels)
+* sync serial comms on buffer borders with magic bytes
+* combine send and receive for normal serial full duplex connection.
+* different sampling rates and sample sizes (tested up to 16k/32bit)
+* rgb breathing feedback: green=maintenance loop, red=mic loop, blue=dac loop
+* low latency with few and small buffers
+
+## Todo
+* half duplex RS485 with protocol for collision avoidance
+* test shutdown and restart mic and dac
+
+These pin combinations work well:
 
 ```
 // normally (H)SPI2
