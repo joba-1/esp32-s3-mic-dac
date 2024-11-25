@@ -1,6 +1,7 @@
 # Simple I2S MIC to DAC Player
 
-2 way mic/dac intercom over serial line 
+2 way mic/dac intercom over serial line.
+
 WIP, used to test new Arduino 3.x I2S API on my ESP32 S3s
 
 ## Done
@@ -14,6 +15,9 @@ WIP, used to test new Arduino 3.x I2S API on my ESP32 S3s
 
 ## Todo
 * half duplex RS485 with protocol for collision avoidance
+    * crc https://github.com/d-bahr/CRCpp
+    * reliable duplex over half duplex https://dl.acm.org/doi/pdf/10.1145/363347.363366
+    * ready made https://github.com/MichaelJonker/HardwareSerialRS485
 * test shutdown and restart mic and dac
 
 These pin combinations work well:
@@ -31,3 +35,14 @@ These pin combinations work well:
 #define RS485_TX  17
 #define RS485_RX  18 
 ```
+
+## Half Duplex
+* RS485 is a shared bus, i.e it must be ensured only one device talks at a time
+    * One solution is: one device is master, others are slaves.
+    * Slaves never send without being asked by the master first.
+    * Slaves are required to respond fast
+        * if a slave cannot fulfill the request, at least send a NACK
+        * after a short period no answer is allowed
+    * Each device has a device ID so the master can address it.
+* Master collects available slaves during bus idle
+    * sends a hello message to all available IDs -> response or timeout
